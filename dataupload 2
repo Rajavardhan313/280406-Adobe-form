@@ -1,0 +1,129 @@
+REPORT Z_DYNAMIC_FILE_UPLOAD.
+
+* Selection Screen parameters
+PARAMETERS: p_table TYPE dd02l-tabname OBLIGATORY, " Table Name
+            p_file  TYPE localfile OBLIGATORY.     " File Path
+
+* Data Declarations
+DATA: gt_raw_data TYPE TABLE OF string,            " Raw data from file
+      gv_filename TYPE string.
+FIELD-SYMBOLS: <ft_dynamic_table> TYPE STANDARD TABLE HENSEL, " Dynamic Internal Table
+               <fs_dynamic_wa>    TYPE any,                  " Dynamic Work Area
+               <fs_field>         TYPE any.
+
+*--------------------------------------------------------------------*
+* AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE
+* Provides an F4 help (file browser) for selecting the local file.
+*--------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+  CALL METHOD cl_gui_frontend_services=>file_open_dialog
+    CHANGING
+      filename             = gv_filename
+      full_path            = p_file
+    EXCEPTIONS
+      cntl_error           = 1
+      error_no_gui         = 2
+      not_supported_by_gui = 3
+      OTHERS               = 4.
+  IF sy-subrc <> 0.
+*   Error handling for file dialog
+  ENDIF.
+
+*--------------------------------------------------------------------*
+* START-OF-SELECTION
+* Main logic
+*--------------------------------------------------------------------*
+START-OF-SELECTION.
+  PERFORM upload_file_to_internal_table.
+  PERFORM create_dynamic_table.
+  PERFORM populate_and_save_data.
+
+*&--------------------------------------------------------------------*
+*&      Form  UPLOAD_FILE_TO_INTERNAL_TABLE
+*&--------------------------------------------------------------------*
+FORM upload_file_to_internal_table.
+* Use GUI_UPLOAD to read the text file content into a raw string table
+  CALL METHOD cl_gui_frontend_services=>gui_upload
+    EXPORTING
+      filename                = p_file
+      filetype                = 'ASC' " ASCII text file
+      has_field_separator     = abap_true " Assumes tab or comma separated for text file
+    CHANGING
+      data_tab                = gt_raw_data
+    EXCEPTIONS
+      file_open_error         = 1
+      file_read_error         = 2
+      no_batch                = 3
+      gui_refuse_filetransfer = 4
+      invalid_type            = 5
+      no_authority            = 6
+      unknown_error           = 7
+      bad_data_format         = 8
+      abap_con_init_failed    = 9
+      OTHERS                  = 10.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Error uploading file' TYPE 'E'.
+    STOP.
+  ENDIF.
+ENDFORM.
+
+*&--------------------------------------------------------------------*
+*&      Form  CREATE_DYNAMIC_TABLE
+*&--------------------------------------------------------------------*
+FORM create_dynamic_table.
+* Create a dynamic internal table based on the structure of the input table name
+  DATA: lr_descr_ref TYPE REF TO cl_abap_tabledescr.
+
+  TRY.
+      lr_descr_ref ?= cl_abap_tabledescr=>describe_by_name( p_table ).
+      CREATE DATA <ft_dynamic_table> TYPE HANDLE lr_descr_ref.
+      ASSIGN <ft_dynamic_table> TO <ft_dynamic_table>.
+      CREATE DATA <fs_dynamic_wa> LIKE LINE OF <ft_dynamic_table>.
+      ASSIGN <fs_dynamic_wa> TO <fs_dynamic_wa>.
+
+    CATCH cx_abap_not_existing.
+      MESSAGE 'Table does not exist' TYPE 'E'.
+      STOP.
+    CATCH cx_abap_invalid_table_descr.
+      MESSAGE 'Invalid table description' TYPE 'E'.
+      STOP.
+  ENDTRY.
+ENDFORM.
+
+*&--------------------------------------------------------------------*
+*&      Form  POPULATE_AND_SAVE_DATA
+*&--------------------------------------------------------------------*
+FORM populate_and_save_data.
+  DATA: lv_line TYPE string,
+        lt_fields TYPE TABLE OF string,
+        lv_msg TYPE string.
+
+  LOOP AT gt_raw_data INTO lv_line.
+*   Split the raw line into fields (assuming tab-separated or single string if no separator found by gui_upload)
+*   For CSV use ',' as separator, for TXT use cl_abap_char_utilities=>horizontal_tab
+    SPLIT lv_line AT cl_abap_char_utilities=>horizontal_tab INTO TABLE lt_fields.
+    CLEAR <fs_dynamic_wa>.
+
+    LOOP AT lt_fields ASSIGNING <fs_field>.
+*     Dynamically assign fields to the work area structure
+*     This requires the file columns to match the table fields in order
+      ASSIGN COMPONENT sy-tabix OF STRUCTURE <fs_dynamic_wa> TO <fs_field>.
+      IF sy-subrc = 0.
+        <fs_field> = <fs_field>.
+      ENDIF.
+    ENDLOOP.
+
+    APPEND <fs_dynamic_wa> TO <ft_dynamic_table>.
+    CLEAR lt_fields.
+  ENDLOOP.
+
+*   Insert into the database table dynamically
+  INSERT (p_table) FROM TABLE <ft_dynamic_table>.
+  IF sy-subrc = 0.
+    MESSAGE |Data successfully uploaded to table { p_table }| TYPE 'S'.
+  ELSE.
+    lv_msg = sy-subrc.
+    MESSAGE |Error during database insert. SY-SUBRC: { lv_msg }| TYPE 'E'.
+  ENDIF.
+ENDFORM.
