@@ -1,74 +1,383 @@
 REPORT Z_DYNAMIC_FILE_UPLOAD.
+*& Global Data Definitions
+*&---------------------------------------------------------------------*
+DATA gt_data TYPE REF TO data.
+DATA gs_data TYPE REF TO data.
 
-* Selection screen parameters for table name and file path
-PARAMETERS: p_table TYPE dd02l-tabname OBLIGATORY,  " Input for table name
-            p_file  TYPE rlgrap-filename OBLIGATORY MEMORY ID ysm. " Input for file path
+FIELD-SYMBOLS: <ft_data> TYPE STANDARD TABLE,
+<fs_data> TYPE any.
 
-* Dynamic data declarations
-DATA: gt_data  TYPE REF TO data,
-      gs_data  TYPE REF TO data,
-      gt_file_content TYPE STANDARD TABLE OF string, " Raw file content
-      gs_file_row     TYPE string.
+"Table Structure
+DATA: gt_dd03p TYPE TABLE OF dd03p.
+FIELD-SYMBOLS: <fs_dd03p> TYPE dd03p.
 
-* Field symbols for dynamic programming
-FIELD-SYMBOLS: <ft_data>     TYPE ANY TABLE,
-               <fs_data>     TYPE ANY,
-               <fs_field>    TYPE ANY.
+"Error Report
+DATA: gs_error_report TYPE bapiret2,
+      gt_error_report TYPE TABLE OF bapiret2.
 
+*&---------------------------------------------------------------------*
+*& Selection Screen Definition
+*&---------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME TITLE TEXT-b01.
+  PARAMETERS: p_table TYPE dd02l-tabname OBLIGATORY.
+  SELECTION-SCREEN SKIP.
+  PARAMETERS: p_file LIKE rlgrap-filename OBLIGATORY MEMORY ID zmdmfile.
+  SELECTION-SCREEN SKIP.
+  SELECTION-SCREEN BEGIN OF LINE.
+    SELECTION-SCREEN COMMENT 1(30) TEXT-rfr.
+    PARAMETERS: p_refr  RADIOBUTTON GROUP r01.
+  SELECTION-SCREEN END OF LINE.
+  SELECTION-SCREEN BEGIN OF LINE.
+    SELECTION-SCREEN COMMENT 1(30) TEXT-ups.
+    PARAMETERS: p_upsrt RADIOBUTTON GROUP r01.
+  SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK b01.
+
+*&---------------------------------------------------------------------*
+*& PAI/PBO Processing
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+
+  "F4 for File name
+  PERFORM f4_file_name USING 'P_FILE' CHANGING p_file.
+
+AT SELECTION-SCREEN ON p_table.
+
+  "Validate the Table/Input
+  PERFORM validate_table .
+
+*&---------------------------------------------------------------------*
+*& Start-of-Selection Event
+*&---------------------------------------------------------------------*
 START-OF-SELECTION.
-  PERFORM upload_file_to_internal_table.
-  PERFORM process_and_insert_data.
+
+  "Initialization
+  PERFORM initialization.
+
+  "Get Excel data in internal table
+  PERFORM convert_excel.
+
+  "Upload data to database table
+  PERFORM upload_table.
 
 *&---------------------------------------------------------------------*
-*&      Form  upload_file_to_internal_table
+*& End-of-Selection Event
 *&---------------------------------------------------------------------*
-FORM upload_file_to_internal_table.
-  CALL FUNCTION 'GUI_UPLOAD'
+END-OF-SELECTION.
+
+  "Display ALV Report
+  PERFORM display_report.
+
+*&---------------------------------------------------------------------*
+*& Form f4_file_name
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM f4_file_name USING p_field TYPE any
+                  CHANGING p_file TYPE any.
+
+  "F4 on File Name
+  CALL FUNCTION 'KD_GET_FILENAME_ON_F4'
     EXPORTING
-      filename                = p_file
-      filetype                = 'ASC' " For text files
-      has_field_separator     = 'X'   " Use 'X' if fields are tab/comma separated
-    TABLES
-      data_tab                = gt_file_content
+      program_name  = syst-repid
+      dynpro_number = syst-dynnr
+      field_name    = p_field
+      static        = ' '
+      mask          = '*.XLSX'
+      fileoperation = 'R'
+      path          = 'C:\TEMP\'
+    CHANGING
+      file_name     = p_file
     EXCEPTIONS
-      file_open_error         = 1
-      gui_refuse_filetransfer = 4
-      OTHERS                  = 17.
+      mask_too_long = 1
+      OTHERS        = 2.
   IF sy-subrc <> 0.
-    MESSAGE 'Error in file upload' TYPE 'E'.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
   ENDIF.
-ENDFORM.
 
+ENDFORM.
 *&---------------------------------------------------------------------*
-*&      Form  process_and_insert_data
+*& Form validate_table
 *&---------------------------------------------------------------------*
-FORM process_and_insert_data.
-  " Create dynamic internal table and work area
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM validate_table .
+
+  "Local Variables
+  DATA: ls_dd02l TYPE dd02l,
+        ls_tvarvc type tvarvc.  " C2-8270 C2-8270
+  CONSTANTS : lc_mhk_table(15) type c VALUE 'Z_MHK_TABLE' ." added-C2-8270
+
+  "Upload only Tables in customer namespace
+  IF p_table+0(1) NE 'Z' AND p_table+0(1) NE 'Y'.
+    MESSAGE 'Only Y or Z tables can be uploaded' TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+*— Only transparent tables can be uploaded
+  SELECT SINGLE *
+   FROM dd02l
+   INTO ls_dd02l
+  WHERE tabname = p_table.
+  IF sy-subrc EQ 0.
+    IF ls_dd02l-tabclass NE 'TRANSP'.
+      MESSAGE 'Only transparent TABLES can be uploaded' TYPE 'E'.
+    ENDIF.
+  ELSE.
+    MESSAGE 'Invalid Table Name' TYPE 'E'.
+    RETURN.
+  ENDIF.
+*BOC - C2-8270
+    SELECT SINGLE *
+  INTO ls_tvarvc
+  FROM tvarvc
+  WHERE name = lc_mhk_table
+  and  low = P_table.
+
+   if sy-subrc NE 0.
+      MESSAGE 'Only TVARVC entry Table can be uploaded TYPE ' TYPE 'E'.
+    ENDIF.
+*EOC - C2-8270
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form convert_excel
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM convert_excel .
+
+  "Local Variables
+  DATA lt_raw_data  TYPE truxs_t_text_data.
+
+  "Excel Functions
+  CALL FUNCTION 'TEXT_CONVERT_XLS_TO_SAP'
+    EXPORTING
+*     I_FIELD_SEPERATOR    =
+      i_line_header        = 'X'
+      i_tab_raw_data       = lt_raw_data
+      i_filename           = p_file
+    TABLES
+      i_tab_converted_data = <ft_data>
+    EXCEPTIONS
+      conversion_failed    = 1
+      OTHERS               = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form upload_table
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM upload_table.
+
+  "Local Variables
+  FIELD-SYMBOLS: <fs_value> TYPE any.
+
+  DATA: lv_fieldname         TYPE dfies-lfieldname,
+        lt_value_list        TYPE TABLE OF soli,
+        ls_message           TYPE syst,
+        lv_value_internal    TYPE c,
+        lt_failure_tab       TYPE TABLE OF ddfkeyrc,
+        ls_failure_tab       TYPE ddfkeyrc,
+        lt_additional_fields TYPE dcfielddats,
+        ls_additional_fields TYPE LINE OF dcfielddats.
+  DATA: lv_row_number TYPE i,
+        lv_col_number TYPE i.
+
+  "Get Table Info
+  CALL FUNCTION 'DDIF_TABL_GET'
+    EXPORTING
+      name          = p_table
+      state         = 'A'
+      langu         = sy-langu
+    TABLES
+      dd03p_tab     = gt_dd03p
+    EXCEPTIONS
+      illegal_input = 1
+      OTHERS        = 2.
+  IF sy-subrc <> 0.
+  ENDIF.
+
+  SORT gt_dd03p BY position.
+
+  "Validate each Row
+  REFRESH: gt_error_report[].
+
+  LOOP AT <ft_data> ASSIGNING <fs_data>.
+
+    "Row Number
+    lv_row_number = sy-tabix.
+
+    "Validate Each Field
+    LOOP AT gt_dd03p ASSIGNING <fs_dd03p>.
+
+      "Column Number
+      lv_col_number = sy-tabix.
+
+      lv_fieldname = <fs_dd03p>-fieldname.
+
+      "Get the Value
+      ASSIGN COMPONENT <fs_dd03p>-fieldname OF STRUCTURE <fs_data>
+                    TO <fs_value>.
+      IF sy-subrc NE 0.
+        CONTINUE.
+      ENDIF.
+
+      "Validate the Field/Value
+      REFRESH: lt_failure_tab[].
+
+
+      "Collect the errors
+      LOOP AT lt_failure_tab INTO ls_failure_tab.
+        CLEAR gs_error_report.
+        gs_error_report-type = 'E'.
+        gs_error_report-id = ls_failure_tab-arbgb.
+        gs_error_report-number = ls_failure_tab-msgnr.
+        MESSAGE ID ls_failure_tab-arbgb TYPE 'I' NUMBER ls_failure_tab-msgnr
+        WITH ls_failure_tab-msgv1 ls_failure_tab-msgv2
+             ls_failure_tab-msgv3 ls_failure_tab-msgv4
+        INTO gs_error_report-message.
+        gs_error_report-message_v1  = ls_failure_tab-msgv1.
+        gs_error_report-message_v2 = ls_failure_tab-msgv2.
+        gs_error_report-message_v3 = ls_failure_tab-msgv3.
+        gs_error_report-message_v4 = ls_failure_tab-msgv3.
+        gs_error_report-parameter = ls_failure_tab-keyvalue.
+        gs_error_report-row = lv_row_number.
+        gs_error_report-field  = ls_failure_tab-fieldname.
+        gs_error_report-system  = lv_col_number.
+        APPEND gs_error_report TO gt_error_report.
+      ENDLOOP.
+
+    ENDLOOP.
+
+  ENDLOOP.
+
+  "Check if there are any errors
+  IF gt_error_report[] IS NOT INITIAL.
+    RETURN.
+  ENDIF.
+
+  "Local Task for Update
+  SET UPDATE TASK LOCAL.
+
+  "Modify
+  IF p_refr EQ 'X'.
+    DELETE FROM (p_table).
+  ENDIF.
+
+  MODIFY (p_table) FROM TABLE <ft_data>.
+  IF sy-subrc EQ 0.
+    COMMIT WORK AND WAIT.
+  ELSE.
+    ROLLBACK WORK.
+  ENDIF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form display_report
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM display_report.
+
+  "Local Variables
+  TYPE-POOLS: slis.
+  DATA: lv_alv_callback_program TYPE sy-repid,
+        ls_alv_layout           TYPE slis_layout_alv.
+
+  lv_alv_callback_program = sy-repid.
+
+  ls_alv_layout-zebra = 'X'.
+  ls_alv_layout-colwidth_optimize = 'X'.
+
+  "Display Report
+  IF gt_error_report[] IS INITIAL.
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_interface_check           = ' '
+        i_bypassing_buffer          = ' '
+        i_buffer_active             = ' '
+        i_callback_program          = lv_alv_callback_program
+        i_callback_pf_status_set    = ' '
+        i_callback_user_command     = ' '
+        i_callback_top_of_page      = ' '
+        i_callback_html_top_of_page = ' '
+        i_callback_html_end_of_list = ' '
+        i_structure_name            = p_table
+        i_background_id             = ' '
+        is_layout                   = ls_alv_layout
+      TABLES
+        t_outtab                    = <ft_data>
+      EXCEPTIONS
+        program_error               = 1
+        OTHERS                      = 2.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+  ELSE.
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_interface_check           = ' '
+        i_bypassing_buffer          = ' '
+        i_buffer_active             = ' '
+        i_callback_program          = lv_alv_callback_program
+        i_callback_pf_status_set    = ' '
+        i_callback_user_command     = ' '
+        i_callback_top_of_page      = ' '
+        i_callback_html_top_of_page = ' '
+        i_callback_html_end_of_list = ' '
+        i_structure_name            = 'BAPIRET2'
+        i_background_id             = ' '
+        is_layout                   = ls_alv_layout
+      TABLES
+        t_outtab                    = gt_error_report
+      EXCEPTIONS
+        program_error               = 1
+        OTHERS                      = 2.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form initialization
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM initialization .
+
+  "Create dynamic internal table
   CREATE DATA gt_data TYPE TABLE OF (p_table).
   ASSIGN gt_data->* TO <ft_data>.
+
+  "Create dynamic work area
   CREATE DATA gs_data TYPE (p_table).
   ASSIGN gs_data->* TO <fs_data>.
 
-  LOOP AT gt_file_content INTO gs_file_row.
-    " *** CRITICAL STEP: Parse the 'gs_file_row' string ***
-    " You must split the string by your file's delimiter (e.g., comma, tab)
-    " and assign the values to the fields of <fs_data> dynamically.
-    " Example logic (requires careful implementation based on file format):
-    * ASSIGN COMPONENT 'FIELD1' OF STRUCTURE <fs_data> TO <fs_field>.
-    * IF sy-subrc = 0.
-    *   <fs_field> = ... value from parsed row ...
-    * ENDIF.
-    " ... repeat for all fields ...
-
-    " Insert into the database table
-    MODIFY (p_table) FROM <fs_data>. " Uses dynamic table name
-    IF sy-subrc = 0.
-      * Success handling
-    ELSE.
-      * Error handling
-    ENDIF.
-  ENDLOOP.
-  COMMIT WORK.
-  MESSAGE 'Data upload complete.' TYPE 'S'.
 ENDFORM.
-
