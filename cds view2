@@ -1,0 +1,64 @@
+@EndUserText.label: 'PM Equipment Count by Status and Functional Location'
+@AbapCatalog.sqlViewName: 'ZIPMEQSTAT'
+@AbapCatalog.compiler.compareFilter: true
+@AccessControl.authorizationCheck: #CHECK
+@VDM.viewType: #COMPOSITE
+@Analytics.dataCategory: #CUBE
+@Analytics.dataExtraction.enabled: true
+
+define view entity ZI_PM_Equipment_Status
+  as select from I_Equipment            as Equipment
+
+  left outer join I_EquipmentSystemStatus as SysStatus
+    on SysStatus.Equipment = Equipment.Equipment
+
+  left outer join I_SystemStatusText     as StatusText
+    on StatusText.SystemStatus = SysStatus.SystemStatus
+   and StatusText.Language     = $session.system_language
+
+  left outer join I_FunctionalLocationText as FlocText
+    on FlocText.FunctionalLocation = Equipment.FunctionalLocation
+   and FlocText.Language           = $session.system_language
+
+{
+  /* -------------------- Keys for Aggregation -------------------- */
+
+  key Equipment.Plant                                 as Plant,
+
+  key coalesce(
+        Equipment.FunctionalLocation,
+        'NO_FLOC'
+      )                                               as FunctionalLocation,
+
+  key coalesce(
+        FlocText.FunctionalLocationName,
+        'No Functional Location'
+      )                                               as FunctionalLocationText,
+
+  key SysStatus.SystemStatus                          as SystemStatus,
+
+      StatusText.SystemStatusShortName                as SystemStatusText,
+
+  /* -------------------- Aggregated Field -------------------- */
+
+  @EndUserText.label: 'Equipment Count'
+  count( distinct Equipment.Equipment )               as EquipmentCount
+
+}
+where
+      /* Only active equipment */
+      Equipment.EquipmentIsDeleted = ''
+
+  and /* Exclude inactive statuses */
+      SysStatus.SystemStatus not in ( 'DLT', 'DEAC', 'OSRV' )
+
+  and /* Only active system statuses */
+      SysStatus.IsActive = 'X'
+
+group by
+  Equipment.Plant,
+  coalesce( Equipment.FunctionalLocation, 'NO_FLOC' ),
+  coalesce( FlocText.FunctionalLocationName, 'No Functional Location' ),
+  SysStatus.SystemStatus,
+  StatusText.SystemStatusShortName
+;
