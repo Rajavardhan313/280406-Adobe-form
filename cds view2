@@ -1,64 +1,63 @@
 @EndUserText.label: 'PM Equipment Count by Status and Functional Location'
-@AbapCatalog.sqlViewName: 'ZIPMEQSTAT'
-@AbapCatalog.compiler.compareFilter: true
 @AccessControl.authorizationCheck: #CHECK
 @VDM.viewType: #COMPOSITE
 @Analytics.dataCategory: #CUBE
-@Analytics.dataExtraction.enabled: true
 
 define view entity ZI_PM_Equipment_Status
-  as select from I_Equipment            as Equipment
+  as select from I_Equipment                  as Equipment
 
-  left outer join I_EquipmentSystemStatus as SysStatus
+  left outer join I_EquipmentSystemStatus     as SysStatus
     on SysStatus.Equipment = Equipment.Equipment
 
-  left outer join I_SystemStatusText     as StatusText
+  left outer join I_SystemStatusText          as StatusText
     on StatusText.SystemStatus = SysStatus.SystemStatus
    and StatusText.Language     = $session.system_language
 
-  left outer join I_FunctionalLocationText as FlocText
+  left outer join I_FunctionalLocationText    as FlocText
     on FlocText.FunctionalLocation = Equipment.FunctionalLocation
    and FlocText.Language           = $session.system_language
 
 {
-  /* -------------------- Keys for Aggregation -------------------- */
+  /* ---------- Derived Fields ---------- */
 
-  key Equipment.Plant                                 as Plant,
+  @EndUserText.label: 'Functional Location'
+  coalesce(
+    Equipment.FunctionalLocation,
+    'NO_FLOC'
+  )                                             as FunctionalLocationKey,
 
-  key coalesce(
-        Equipment.FunctionalLocation,
-        'NO_FLOC'
-      )                                               as FunctionalLocation,
+  @EndUserText.label: 'Functional Location Description'
+  coalesce(
+    FlocText.FunctionalLocationName,
+    'No Functional Location'
+  )                                             as FunctionalLocationText,
 
-  key coalesce(
-        FlocText.FunctionalLocationName,
-        'No Functional Location'
-      )                                               as FunctionalLocationText,
+  /* ---------- Grouping Keys ---------- */
 
-  key SysStatus.SystemStatus                          as SystemStatus,
+  key Equipment.Plant                           as Plant,
 
-      StatusText.SystemStatusShortName                as SystemStatusText,
+  key FunctionalLocationKey                    as FunctionalLocation,
 
-  /* -------------------- Aggregated Field -------------------- */
+  key SysStatus.SystemStatus                   as SystemStatus,
+
+      StatusText.SystemStatusShortName         as SystemStatusText,
+
+  /* ---------- Aggregation ---------- */
 
   @EndUserText.label: 'Equipment Count'
-  count( distinct Equipment.Equipment )               as EquipmentCount
-
+  count( distinct Equipment.Equipment )        as EquipmentCount
 }
+
 where
-      /* Only active equipment */
       Equipment.EquipmentIsDeleted = ''
-
-  and /* Exclude inactive statuses */
-      SysStatus.SystemStatus not in ( 'DLT', 'DEAC', 'OSRV' )
-
-  and /* Only active system statuses */
-      SysStatus.IsActive = 'X'
+  and SysStatus.IsActive           = 'X'
+  and SysStatus.IsSystemStatus     = 'X'
 
 group by
-  Equipment.Plant,
-  coalesce( Equipment.FunctionalLocation, 'NO_FLOC' ),
-  coalesce( FlocText.FunctionalLocationName, 'No Functional Location' ),
-  SysStatus.SystemStatus,
+  Plant,
+  FunctionalLocationKey,
+  FunctionalLocationText,
+  SystemStatus,
   StatusText.SystemStatusShortName
 ;
+
