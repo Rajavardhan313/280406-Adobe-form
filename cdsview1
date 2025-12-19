@@ -1,0 +1,37 @@
+
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'EQUIPMENT INFO (Standard Views)'
+@Metadata.ignorePropagatedAnnotations: true
+define root view entity ZCDS_PM06_EQUIP_INFO
+  as select from I_Equipment as Equip
+    association [0..1] to I_EquipmentText as _EquipText
+      on _EquipText.Equipment = Equip.Equipment
+     and _EquipText.Language  = $session.system_language
+    association [0..1] to I_StatusObject as _StatusObject
+      on _StatusObject.ObjectNumber = Equip.ObjectNumber
+{
+  /* key */
+  key Equip.Equipment                                as Equipo,
+
+  /* Text from standard text view (language dependent) */
+  _EquipText.EquipmentDescription                    as Descripcion_del_equipo,
+
+  /* Example: class/type of equipment (adapt as needed) */
+  Equip.EquipmentCategory                            as Clase_de_equipo,   // map from EQUI-EQART if needed
+
+  /* Creation date & user */
+  Equip.CreatedOn                                    as Fecha_de_creacion, // maps EQUI-ERDAT
+  Equip.CreatedByUser                                as Usuario_creador,   // maps EQUI-ERNAM
+
+  /* System status (one option). You can expose code or text. */
+  // Expose the status object number or code:
+  _StatusObject.SystemStatus                         as Estatus_sistema
+
+  /* If you prefer the status text, add a second association: */
+  // association [0..1] to I_SystemStatusText as _SystemStatusText
+  //   on _SystemStatusText.Status = _StatusObject.SystemStatus
+  //  and _SystemStatusText.Language = $session.system_language,
+
+  // then project:
+  // _SystemStatusText.StatusText                     as Estatus_sistema
+}
